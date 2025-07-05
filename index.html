@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+   <meta charset="UTF-8">
+   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+   <title>Web Socket - Audio Testing</title>
+   <script defer src="./main.js"></script>
+</head>
+
+<body>
+   <h1>Audio Testing</h1>
+   <button onclick="start()">Send audio</button>
+
+   <script>
+      const WS_URL = "ws://localhost:3005/";
+      const STREAM_SID = "MZ_SIMULATED_12345";
+      let ws, seq = 0;
+
+      async function start() {
+         ws = new WebSocket(WS_URL);
+         ws.onopen = () => {
+            console.log("WebSocket abierto");
+            sendEvent("connected");
+            sendEvent("start");
+            startAudioLoop();
+         };
+         ws.onclose = () => console.log("WebSocket cerrado");
+      }
+
+      function sendEvent(type) {
+         const msg = { event: type, sequenceNumber: (++seq).toString(), streamSid: STREAM_SID };
+         ws.send(JSON.stringify(msg));
+         console.log("Sent", type, msg);
+      }
+
+      async function startAudioLoop() {
+         const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+         const audioContext = new AudioContext({ sampleRate: 8000 });
+         const src = audioContext.createMediaStreamSource(stream);
+         const proc = audioContext.createScriptProcessor(1024, 1, 1);
+         src.connect(proc);
+         proc.connect(audioContext.destination);
+
+         let chunkId = 0;
+         proc.onaudioprocess = e => {
+            const pcm = e.inputBuffer.getChannelData(0);
+            const ulaw = pcmToULaw(pcm);
+            const payload = btoa(String.fromCharCode(...ulaw));
+            const msg = {
+               event: "media",
+               sequenceNumber: (++seq).toString(),
+               streamSid: STREAM_SID,
+               media: {
+                  track: "inbound",
+                  chunk: (++chunkId).toString(),
+                  timestamp: Date.now().toString(),
+                  payload
+               }
+            };
+            ws.send(JSON.stringify(msg));
+            console.log("Sent media chunk", msg.media.chunk);
+         };
+
+         // Tras 10 segundos envía stop
+         setTimeout(() => {
+            proc.disconnect();
+            src.disconnect();
+            sendEvent("stop");
+            ws.close();
+         }, 10000);
+      }
+
+      function pcmToULaw(pcmSamples) {
+         const BIAS = 0x84, CLIP = 32635;
+         const out = new Uint8Array(pcmSamples.length);
+         for (let i = 0; i < pcmSamples.length; i++) {
+            let s = Math.max(-1, Math.min(1, pcmSamples[i])) * 32767;
+            const sign = s < 0 ? 0x80 : 0;
+            if (s < 0) s = -s;
+            if (s > CLIP) s = CLIP;
+            s += BIAS;
+            let exp = 7;
+            for (let mask = 0x4000; (s & mask) == 0 && exp > 0; mask >>= 1) exp--;
+            const mant = (s >> (exp + 3)) & 0x0F;
+            out[i] = ~(sign | (exp << 4) | mant);
+         }
+         return out;
+      }
+   </script>
+</body>
+
+</html>
